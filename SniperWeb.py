@@ -17,7 +17,7 @@ pd.set_option('future.no_silent_downcasting', True)
 # ==========================================
 # 1. Config & Domain Models
 # ==========================================
-st.set_page_config(page_title="Sniper v5.41 ColorFix", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Sniper v5.42 Elite", page_icon="🛡️", layout="wide")
 
 try:
     raw_fugle_keys = st.secrets.get("Fugle_API_Key", "")
@@ -50,6 +50,7 @@ AI_COMMANDER_PROMPT = """
 * **💣 伏擊 (Ambush)**：股價貼均價 + 量比爆發 + 大戶 1H 翻紅。(最佳進場點)
 * **👀 量增 (Accumulation)**：股價未動，量能先行。
 * **💀 出貨 (Dump)**：跌破 VWAP + 爆量 + 大戶綠賣。**優先停損。**
+* **🚨 撤退 (Retreat)**：【1% 鐵律】現價跌破 VWAP 超過 1%，無條件執行撤退。
 * **❌ 誘多 (Bull Trap)**：漲幅 > 2% 但大戶籌碼 (1H 或 Day) 為**綠色負值**。
 
 ---
@@ -60,7 +61,7 @@ AI_COMMANDER_PROMPT = """
 **輸入數據**：你將收到一份 CSV 格式的即時戰報，包含庫存與監控名單。
 **執行動作**：
 1.  **庫存診斷 (最高優先)**：
-    * 針對 **庫存股**，若出現「💀出貨」或「❌誘多」，直接給出**防守價** (例如 VWAP 下方)。
+    * 針對 **庫存股**，若出現「💀出貨」、「🚨撤退」或「❌誘多」，直接給出**逃命指令**。
     * 若庫存股訊號正常，簡述「續抱」或「移動停利」。
 2.  **戰術掃描**：
     * **09:00~13:00**：從名單中找出 **「💣 伏擊」** 或 **「🔥 攻擊」** 的標的，建議進場點。
@@ -214,7 +215,7 @@ class Database:
 db = Database(DB_PATH)
 
 # ==========================================
-# 4. Utilities
+# 4. Utilities (UPDATED LOGIC)
 # ==========================================
 def format_number(x, decimals=2, *, pos_color="#ff4d4f", neg_color="#2ecc71", zero_color="#e0e0e0", threshold=None, threshold_color="#ff4d4f", suffix=""):
     try:
@@ -271,15 +272,20 @@ def get_stock_name(symbol):
     except: return symbol
 
 def get_dynamic_thresholds(price):
-    if price >= 1200: return 2.0, 1.2, 1.8
-    elif price >= 1000: return 2.0, 1.2, 2.0
-    elif price >= 800:  return 2.0, 1.2, 2.5
-    elif price >= 650:  return 2.0, 1.2, 3.0
-    elif price >= 500:  return 2.0, 1.2, 4.0
-    elif price >= 300:  return 2.0, 1.2, 5.0
-    elif price >= 150:  return 2.5, 1.5, 6.0
-    elif price >= 50:   return 2.5, 1.5, 8.0
-    else:               return 3.5, 2.5, 10.0
+    """
+    [Elite Update] 動態門檻優化：回傳字典，加入 overheat (追高禁區)
+    """
+    if price >= 1000:
+        return {"tgt_pct": 1.5, "tgt_ratio": 1.2, "ambush": 1.5, "overheat": 4.0}
+    elif price >= 500:
+        return {"tgt_pct": 2.0, "tgt_ratio": 1.5, "ambush": 2.5, "overheat": 5.0}
+    elif price >= 150:
+        return {"tgt_pct": 2.5, "tgt_ratio": 1.8, "ambush": 4.0, "overheat": 6.5}
+    elif price >= 70:
+        return {"tgt_pct": 3.0, "tgt_ratio": 2.2, "ambush": 6.0, "overheat": 8.0}
+    else:
+        # 低價股雜訊多，門檻極高
+        return {"tgt_pct": 5.0, "tgt_ratio": 3.0, "ambush": 10.0, "overheat": 9.0}
 
 def _calc_est_vol(current_vol):
     now = datetime.now(timezone.utc) + timedelta(hours=8)
@@ -290,22 +296,48 @@ def _calc_est_vol(current_vol):
     if elapsed_minutes >= 270: return current_vol
     return int(current_vol * (270 / elapsed_minutes))
 
-def check_signal(pct, is_bullish, net_day, net_1h, ratio, tgt_pct, tgt_ratio, ambush_ratio, is_breakdown, price, vwap, has_attacked, now_time, vol_lots):
-    if pct >= 9.5: return "漲停"
+def check_signal(pct, is_bullish, net_day, net_1h, ratio, thresholds, is_breakdown, price, vwap, has_attacked, now_time, vol_lots):
+    """
+    [Elite Update] 訊號檢查核心 - 導入 1% 鐵律與 09:15 暖機機制
+    """
+    # 1. 【1% 鐵律】最高優先級：破線即撤退
+    if is_breakdown: return "🚨撤退"
 
-    # [NEW] End Game Strategy
+    # 2. 漲停判定
+    if pct >= 9.5: return "👑漲停"
+
+    # 3. 09:15 前暖機保護 (防止量比失真)
+    if now_time.time() < dt_time(9, 15):
+        return "⏳暖機"
+
+    # 4. 均價生死線：線下不論大戶數據，一律視為弱勢
+    if not is_bullish:
+        if ratio >= thresholds['tgt_ratio'] and net_1h < 0: return "💀出貨"
+        return "📉線下"
+
+    # 5. 彈力帶位階判定 (Bias/Overheat)
+    bias = ((price - vwap) / vwap) * 100 if vwap > 0 else 0
+    if bias > thresholds['overheat']:
+        return "⚠️過熱"
+
+    # 6. End Game Strategy (尾盤獵殺)
     if dt_time(13, 0) <= now_time.time() <= dt_time(13, 25):
-        if (3.0 <= pct <= 9.0) and (price > vwap) and (net_1h > 0):
+        if (3.0 <= pct <= 9.0) and (net_1h > 0):
              if vol_lots > 0 and (net_day / vol_lots >= 0.05):
-                 return "尾盤"
+                 return "🔥尾盤"
 
+    # 7. 攻擊訊號
     if ratio > 0:
-        if (ratio >= ambush_ratio) and (abs(price - vwap) / vwap <= 0.01) and (pct <= 2.0) and (net_1h > 0) and (not has_attacked): return "伏擊"
-        if is_bullish and net_day > 200 and pct >= tgt_pct and ratio >= tgt_ratio: return "攻擊"
-        if ratio >= tgt_ratio and pct < tgt_pct and is_bullish and net_1h > 200: return "量增"
-        if is_breakdown and ratio >= tgt_ratio and net_1h < 0: return "出貨"
-    if pct > 2.0 and net_1h < 0: return "誘多"
-    if is_bullish and pct >= tgt_pct: return "價強"
+        if (bias <= 1.5) and (ratio >= thresholds['ambush']) and (net_1h > 0) and (not has_attacked): 
+            return "💣伏擊"
+        if pct >= thresholds['tgt_pct'] and ratio >= thresholds['tgt_ratio'] and net_day > 200: 
+            return "🔥攻擊"
+        if ratio >= thresholds['tgt_ratio'] and pct < thresholds['tgt_pct'] and net_1h > 200: 
+            return "👀量增"
+        
+    if pct > 2.0 and net_1h < 0: return "❌誘多"
+    if pct >= thresholds['tgt_pct']: return "⚠️價強"
+    
     return "盤整"
 
 def get_market_snapshot():
@@ -402,9 +434,10 @@ class NotificationManager:
     COOLDOWN_SECONDS = 600
     RATE_LIMIT_DELAY = 1.0
     EMOJI_MAP = {
-        "攻擊": "🚀", "伏擊": "💣", "量增": "👀",
-        "出貨": "💀", "跌破": "⚠️", "漲停": "👑",
-        "價強": "💪", "誘多": "🎣", "尾盤": "🔥"
+        "🔥攻擊": "🚀", "💣伏擊": "💣", "👀量增": "👀",
+        "💀出貨": "💀", "🚨撤退": "⚠️", "👑漲停": "👑",
+        "⚠️價強": "💪", "❌誘多": "🎣", "🔥尾盤": "🔥",
+        "⚠️過熱": "🚫", "⏳暖機": "⏳", "📉線下": "📉"
     }
 
     def __init__(self):
@@ -418,6 +451,10 @@ class NotificationManager:
     def should_notify(self, event: SniperEvent) -> bool:
         if event.is_test: return True
         if not MarketSession.is_market_open(): return False
+        
+        # [Elite] 撤退訊號不設 CD，確保立即收到
+        if "撤退" in event.event_label: return True
+        
         key = f"{event.code}_{event.scope}_{event.event_label}"
         if time.time() - self._cooldowns.get(key, 0) < self.COOLDOWN_SECONDS: return False
         return True
@@ -541,8 +578,6 @@ class SniperEngine:
                         # Fallback to history for last close if intraday fails
                         hist = tickers.tickers['^TWII'].history(period="1d")
                         if not hist.empty:
-                            # Note: Yahoo volume for indices is often 0 or shares, not value.
-                            # We use a rough estimate if needed, but here just keep 0 if unknown.
                             pass
                     except: pass
             except: pass
@@ -610,22 +645,26 @@ class SniperEngine:
             net_10m = sum(x[1] for x in self.vol_queues[code] if x[0] > now_ts - 600)
             net_day = self.daily_net.get(code, 0)
 
-            tgt_pct, tgt_ratio, ambush_ratio = get_dynamic_thresholds(price)
-
-            raw_state = check_signal(pct, price >= vwap, net_day, net_1h, ratio, tgt_pct, tgt_ratio, ambush_ratio, price < vwap*0.99, price, vwap, code in self.active_flags, now_time, vol_lots)
+            # [Elite Update] 動態門檻 & 1% 鐵律 check
+            thresholds = get_dynamic_thresholds(price)
+            # 1% 鐵律：現價 < 均價 0.99
+            is_breakdown = price < (vwap * 0.99)
+            
+            raw_state = check_signal(pct, price >= vwap, net_day, net_1h, ratio, thresholds, is_breakdown, price, vwap, code in self.active_flags, now_time, vol_lots)
 
             event_label = None
             scope = "inventory" if code in self.inventory_codes else "watchlist"
 
-            if "攻擊" in raw_state and code not in self.active_flags: event_label = "攻擊"
-            elif "漲停" in raw_state and scope == "inventory": event_label = "漲停"
-            elif "出貨" in raw_state and code not in self.daily_risk_flags and scope == "inventory": event_label = "出貨"
-            elif "伏擊" in raw_state and scope == "watchlist": event_label = "伏擊"
-            elif "尾盤" in raw_state: event_label = "尾盤"
+            if "攻擊" in raw_state and code not in self.active_flags: event_label = "🔥攻擊"
+            elif "漲停" in raw_state and scope == "inventory": event_label = "👑漲停"
+            elif "撤退" in raw_state: event_label = "🚨撤退" # 優先發送
+            elif "出貨" in raw_state and code not in self.daily_risk_flags and scope == "inventory": event_label = "💀出貨"
+            elif "伏擊" in raw_state and scope == "watchlist": event_label = "💣伏擊"
+            elif "尾盤" in raw_state: event_label = "🔥尾盤"
 
             if event_label:
-                if event_label == "攻擊": self.active_flags[code] = True
-                if event_label == "出貨": self.daily_risk_flags[code] = True
+                if "攻擊" in event_label: self.active_flags[code] = True
+                if "出貨" in event_label or "撤退" in event_label: self.daily_risk_flags[code] = True
                 ev = SniperEvent(
                     code=code, name=get_stock_name(code), scope=scope,
                     event_kind="STRATEGY", event_label=event_label,
@@ -710,7 +749,7 @@ class LegacyDispatcher:
 dispatcher = LegacyDispatcher()
 
 with st.sidebar:
-    st.title("🛡️ 戰情室 v5.41")
+    st.title("🛡️ 戰情室 v5.42 Elite")
 
     # --- [TOP] Market Thermometer ---
     st.subheader("🌡️ 大盤溫度計")
@@ -767,7 +806,7 @@ with st.sidebar:
     # --- [BOTTOM] Controls ---
     mode = st.radio("身分模式", ["👀 戰情官", "👨‍✈️ 指揮官"])
     st.subheader("🔍 濾網設定")
-    use_filter = st.checkbox("只看基本面良好")
+    use_filter = st.checkbox("只看基本面良好 (含 > 70元)")
 
     if mode == "👨‍✈️ 指揮官":
         with st.expander("📦 庫存管理 (Inventory)", expanded=False):
@@ -830,7 +869,7 @@ with st.sidebar:
     if st.button("🔥 測試攻擊"):
         dispatcher.dispatch({
             "code": "2330", "name": "台積電 (測試)", "scope": "watchlist",
-            "event_kind": "TEST", "event_label": "攻擊",
+            "event_kind": "TEST", "event_label": "🔥攻擊",
             "price": 888.0, "pct": 3.5, "vwap": 870.0, "ratio": 2.5, "net_10m": 150, "net_1h": 500, "net_day": 1200,
             "timestamp": time.time(), "is_test": True
         })
@@ -933,8 +972,9 @@ def render_live_dashboard():
         df_watch['yoy'] = df_watch['yoy'].fillna(0).infer_objects(copy=False)
         df_watch['eps'] = df_watch['eps'].fillna(0).infer_objects(copy=False)
 
+        # [Elite Update] 菁英濾網：基本面 + 股價 > 70
         if use_filter:
-            df_watch = df_watch[(df_watch['yoy'] > 0) & (df_watch['eps'] > 0) & (df_watch['pe'].notna()) & (df_watch['pe'] < 50)]
+            df_watch = df_watch[(df_watch['yoy'] > 0) & (df_watch['eps'] > 0) & (df_watch['pe'].notna()) & (df_watch['pe'] < 50) & (df_watch['price'] > 70)]
 
         def get_ratio_html(val):
             try:
@@ -966,7 +1006,7 @@ table.sniper-table tr:hover { background-color: #f0f2f6; color: black; }
 <table class="sniper-table">
 <thead>
 <tr>
-<th>📌</th><th>代碼</th><th>名稱</th><th>等級</th><th>現價</th><th>漲跌%</th>
+<th>📌</th><th>代碼</th><th>名稱</th><th>等級</th><th>彈力(%)</th><th>現價</th><th>漲跌%</th>
 <th>均價</th><th>量比</th><th>訊號</th><th>大戶(10m/1H/日)</th><th>營收YoY</th><th>EPS</th><th>PE</th>
 </tr>
 </thead>
@@ -989,17 +1029,36 @@ table.sniper-table tr:hover { background-color: #f0f2f6; color: black; }
             pct_html = f"<span style='color:{main_color}'>{row['pct']:.2f}%</span>"
 
             # VWAP Logic: Red if Price > VWAP, Black if Price <= VWAP
-            if row['price'] > row['vwap']: vwap_color = "#ff4d4f"
-            else: vwap_color = "#000000"
+            if row['price'] >= row['vwap']: 
+                vwap_color = "#ff4d4f"
+                status_icon = "🟢"
+            else: 
+                vwap_color = "#000000"
+                status_icon = "🔴"
 
             vwap_html = f"<span style='color:{vwap_color}'>{row['vwap']:.2f}</span>"
-
             ratio_html = get_ratio_html(row['ratio'])
+
+            # [Elite Update] 彈力帶(Bias) 計算與顯示
+            if row['vwap'] > 0:
+                bias = ((row['price'] - row['vwap']) / row['vwap']) * 100
+            else:
+                bias = 0
+            
+            # 取得該股價對應的 Overheat 門檻
+            thresholds = get_dynamic_thresholds(row['price'])
+            overheat_val = thresholds.get("overheat", 5.0)
+            
+            bias_color = "#000000"
+            if bias > overheat_val: bias_color = "#ff4d4f" # 過熱紅
+            elif bias < -1.0: bias_color = "#2ecc71" # 破線綠
+            
+            bias_html = f"<span style='color:{bias_color}'>{bias:.1f}%</span>"
 
             # [LOGIC FIX] Independent Big Player Coloring
             big_player = f"{bp_span(row['net_10m'])} / {bp_span(row['net_1h'])} / {bp_span(row['net_day'])}"
 
-            html_rows.append(f'<tr class="{row_class}"><td>{pin_icon}</td><td>{row["code"]}</td><td>{row["name"]}</td><td>{row["signal_level"]}</td><td>{price_html}</td><td>{pct_html}</td><td>{vwap_html}</td><td>{ratio_html}</td><td>{row["event_label"]}</td><td>{big_player}</td><td>{row["yoy"]:.1f}%</td><td>{row["eps"]:.2f}</td><td>{row["pe"]:.1f}</td></tr>')
+            html_rows.append(f'<tr class="{row_class}"><td>{status_icon} {pin_icon}</td><td>{row["code"]}</td><td>{row["name"]}</td><td>{row["signal_level"]}</td><td>{bias_html}</td><td>{price_html}</td><td>{pct_html}</td><td>{vwap_html}</td><td>{ratio_html}</td><td>{row["event_label"]}</td><td>{big_player}</td><td>{row["yoy"]:.1f}%</td><td>{row["eps"]:.2f}</td><td>{row["pe"]:.1f}</td></tr>')
 
         final_html = table_start + "".join(html_rows) + "</tbody></table>"
         st.markdown(final_html, unsafe_allow_html=True)
