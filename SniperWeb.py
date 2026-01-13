@@ -17,7 +17,7 @@ pd.set_option('future.no_silent_downcasting', True)
 # ==========================================
 # 1. Config & Domain Models
 # ==========================================
-st.set_page_config(page_title="Sniper v5.42 Elite", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Sniper v5.43 Elite", page_icon="🛡️", layout="wide")
 
 try:
     raw_fugle_keys = st.secrets.get("Fugle_API_Key", "")
@@ -29,9 +29,17 @@ except:
     TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 
 API_KEYS = [k.strip() for k in raw_fugle_keys.split(',') if k.strip()]
+# [Safe Update] 資料庫維持原名，避免資料遺失。雙開時請確保在不同資料夾執行。
 DB_PATH = "sniper_v61.db"
-DEFAULT_WATCHLIST = "3035 3037 2368 2383 6274 8046 3189 3324 3017 3653 2421 3483 3081 3163 4979 4908 3363 4977 6442 2356 3231 2382 6669 2317 2330 2454 2303 6781 4931 3533"
-DEFAULT_INVENTORY = """2330,800,1\n2317,105,5"""
+
+# [01/13 Elite List] 根據投顧早報與戰術分析校準後的最新清單
+DEFAULT_WATCHLIST = "3037 8046 2408 3081 3189 2330 2368 8299 2454 6274 4979 1519 2308 1605 6442 2481 2379 3661 3443 6472"
+
+# [User Inventory] 指揮官最新庫存狀態
+DEFAULT_INVENTORY = """2481,84.4,3
+3231,150.14,7
+4566,54.94,2
+8046,252.64,7"""
 
 AI_COMMANDER_PROMPT = """
 # 🛡️ Sniper 股市戰情室 AI 指揮官
@@ -49,8 +57,9 @@ AI_COMMANDER_PROMPT = """
 * **🔥 攻擊 (Attack)**：漲幅 > 3% + 現價 > 均價 + 大戶狂掃。
 * **💣 伏擊 (Ambush)**：股價貼均價 + 量比爆發 + 大戶 1H 翻紅。(最佳進場點)
 * **👀 量增 (Accumulation)**：股價未動，量能先行。
-* **💀 出貨 (Dump)**：跌破 VWAP + 爆量 + 大戶綠賣。**優先停損。**
+* **💀 出貨 (Dump)**：跌破 VWAP + 爆量 + 大戶綠賣。
 * **🚨 撤退 (Retreat)**：【1% 鐵律】現價跌破 VWAP 超過 1%，無條件執行撤退。
+* **⚠️ 過熱 (Overheat)**：乖離率 (Bias) 過大，彈力帶拉緊，禁止追高。
 * **❌ 誘多 (Bull Trap)**：漲幅 > 2% 但大戶籌碼 (1H 或 Day) 為**綠色負值**。
 
 ---
@@ -109,7 +118,7 @@ class MarketSession:
         return MarketSession.MARKET_OPEN <= now.time() <= MarketSession.MARKET_CLOSE
 
 # ==========================================
-# 3. Database (Block 1 & 2 Separation)
+# 3. Database
 # ==========================================
 class Database:
     def __init__(self, db_path):
@@ -215,7 +224,7 @@ class Database:
 db = Database(DB_PATH)
 
 # ==========================================
-# 4. Utilities (UPDATED LOGIC)
+# 4. Utilities
 # ==========================================
 def format_number(x, decimals=2, *, pos_color="#ff4d4f", neg_color="#2ecc71", zero_color="#e0e0e0", threshold=None, threshold_color="#ff4d4f", suffix=""):
     try:
@@ -452,8 +461,8 @@ class NotificationManager:
         if event.is_test: return True
         if not MarketSession.is_market_open(): return False
         
-        # [Elite] 撤退訊號不設 CD，確保立即收到
-        if "撤退" in event.event_label: return True
+        # [Elite] 庫存撤退訊號不設 CD，確保立即收到
+        if "撤退" in event.event_label and event.scope == "inventory": return True
         
         key = f"{event.code}_{event.scope}_{event.event_label}"
         if time.time() - self._cooldowns.get(key, 0) < self.COOLDOWN_SECONDS: return False
@@ -657,7 +666,14 @@ class SniperEngine:
 
             if "攻擊" in raw_state and code not in self.active_flags: event_label = "🔥攻擊"
             elif "漲停" in raw_state and scope == "inventory": event_label = "👑漲停"
-            elif "撤退" in raw_state: event_label = "🚨撤退" # 優先發送
+            
+            # [Elite Update] 訊號分流：撤退僅針對庫存發送，非庫存不發送
+            elif "撤退" in raw_state: 
+                if scope == "inventory":
+                    event_label = "🚨撤退" # 觸發通知
+                else:
+                    event_label = None # 不觸發通知，但 DB 仍會記錄 raw_state
+
             elif "出貨" in raw_state and code not in self.daily_risk_flags and scope == "inventory": event_label = "💀出貨"
             elif "伏擊" in raw_state and scope == "watchlist": event_label = "💣伏擊"
             elif "尾盤" in raw_state: event_label = "🔥尾盤"
@@ -749,7 +765,7 @@ class LegacyDispatcher:
 dispatcher = LegacyDispatcher()
 
 with st.sidebar:
-    st.title("🛡️ 戰情室 v5.42 Elite")
+    st.title("🛡️ 戰情室 v5.43 Elite")
 
     # --- [TOP] Market Thermometer ---
     st.subheader("🌡️ 大盤溫度計")
