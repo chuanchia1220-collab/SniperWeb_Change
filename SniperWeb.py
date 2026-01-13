@@ -461,13 +461,21 @@ class NotificationManager:
         if event.is_test: return True
         if not MarketSession.is_market_open(): return False
         
-        # [Elite] 庫存撤退訊號不設 CD，確保立即收到
-        if "撤退" in event.event_label and event.scope == "inventory": return True
-        
+        # 1. 先定義 Key (這行一定要在判斷式之前)
         key = f"{event.code}_{event.scope}_{event.event_label}"
+        
+        # 2. [修正重點] 針對庫存撤退，不再無條件回傳 True，而是檢查 "5分鐘 (300秒)" 冷卻
+        if "撤退" in event.event_label and event.scope == "inventory":
+             # 如果距離上次發送不到 300 秒 -> 回傳 False (攔截！不發送)
+             if time.time() - self._cooldowns.get(key, 0) < 300: 
+                 return False
+             # 超過 5 分鐘 -> 回傳 True (放行！)
+             return True
+             
+        # 3. 其他一般訊號 (維持 600秒/10分鐘 冷卻)
         if time.time() - self._cooldowns.get(key, 0) < self.COOLDOWN_SECONDS: return False
+        
         return True
-
     def enqueue(self, event: SniperEvent):
         if self.should_notify(event):
             if not event.is_test: self._cooldowns[f"{event.code}_{event.scope}_{event.event_label}"] = time.time()
