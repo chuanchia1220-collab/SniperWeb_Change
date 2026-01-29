@@ -16,7 +16,7 @@ pd.set_option('future.no_silent_downcasting', True)
 # ==========================================
 # 1. Config & Domain Models
 # ==========================================
-st.set_page_config(page_title="Sniper v6.0 Final", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Sniper v6.1 Table", page_icon="🛡️", layout="wide")
 
 try:
     raw_fugle_keys = st.secrets.get("Fugle_API_Key", "")
@@ -30,8 +30,8 @@ except:
 API_KEYS = [k.strip() for k in raw_fugle_keys.split(',') if k.strip()]
 DB_PATH = "sniper_v61.db"
 
-# [01/28 Elite List] 70-400元 精選清單
-DEFAULT_WATCHLIST = "3037 6274 1795 1513 3019 3491 2408 8261 3035 3443"
+# [01/29 Elite List] 70-400元 精選清單
+DEFAULT_WATCHLIST = "3006 3037 1513 3189 1795 3491 8046 6274 2383 6213"
 
 # [User Inventory] 指揮官最新庫存狀態
 DEFAULT_INVENTORY = """2481,84.4,3
@@ -86,7 +86,6 @@ class Database:
 
     def _init_db(self):
         conn = self._get_conn(); c = conn.cursor()
-        # [Schema Update] 新增 buy_pressure, sell_pressure
         c.execute('''CREATE TABLE IF NOT EXISTS realtime (code TEXT PRIMARY KEY, name TEXT, category TEXT, price REAL, pct REAL, vwap REAL, vol REAL, est_vol REAL, ratio REAL, net_1h REAL, net_10m REAL, net_day REAL, signal TEXT, update_time REAL, data_status TEXT DEFAULT 'DATA_OK', signal_level TEXT DEFAULT 'B', risk_status TEXT DEFAULT 'NORMAL', situation TEXT, ratio_yest REAL, buy_pressure REAL, sell_pressure REAL)''')
         c.execute('''CREATE TABLE IF NOT EXISTS inventory (code TEXT PRIMARY KEY, cost REAL, qty REAL)''')
         c.execute('''CREATE TABLE IF NOT EXISTS watchlist (code TEXT PRIMARY KEY)''')
@@ -375,14 +374,12 @@ class SniperEngine:
             if not price: return None
 
             # [Inner/Outer Disc Core]
-            # Get best bid/ask
             best_asks = q.get('order', {}).get('bestAsks', [])
             best_bids = q.get('order', {}).get('bestBids', [])
             best_ask = best_asks[0].get('price', price) if best_asks else price
             best_bid = best_bids[0].get('price', price) if best_bids else price
 
             # [Buy/Sell Pressure Calculation]
-            # Sum of volumes in top 5 bids vs asks
             total_bid_vol = sum([b.get('unit', 0) for b in best_bids])
             total_ask_vol = sum([a.get('unit', 0) for a in best_asks])
             total_pressure = total_bid_vol + total_ask_vol
@@ -518,10 +515,10 @@ if "sniper_engine_core" not in st.session_state:
 engine = st.session_state.sniper_engine_core
 
 # ==========================================
-# 7. UI (Card Layout)
+# 7. UI (Table Layout)
 # ==========================================
 with st.sidebar:
-    st.title("🛡️ 戰情室 v6.0 Final")
+    st.title("🛡️ 戰情室 v6.1 Table")
     st.subheader("🌡️ 大盤溫度計")
     
     tse_val = engine.market_stats.get("TSE", 0) / 100000000
@@ -600,7 +597,7 @@ def render_live_dashboard():
         else: st.info("尚無庫存")
 
     st.markdown("---")
-    st.subheader("⚔️ 精銳監控 (Tactical Cockpit)")
+    st.subheader("⚔️ 精銳監控 (Tactical Table)")
 
     df_watch = db.get_watchlist_view()
     
@@ -617,72 +614,74 @@ def render_live_dashboard():
     if use_filter:
         df_watch = df_watch[df_watch['price'] > 70]
 
-    # --- Card Rendering ---
-    cols_per_row = 3
-    rows = [st.columns(cols_per_row) for _ in range((len(df_watch) + cols_per_row - 1) // cols_per_row)]
-    cols = [col for row in rows for col in row]
+    # --- HTML Table Construction (High Density) ---
+    table_start = """
+<style>
+table.sniper-table { width: 100%; border-collapse: collapse; font-family: 'Courier New', monospace; }
+table.sniper-table th { text-align: left; background-color: #262730; color: white; padding: 8px; font-size: 14px; white-space: nowrap; }
+table.sniper-table td { padding: 6px; border-bottom: 1px solid #444; font-size: 15px; vertical-align: middle; white-space: nowrap; }
+table.sniper-table tr.pinned-row { background-color: #fff9c4 !important; color: black !important; }
+table.sniper-table tr:hover { background-color: #f0f2f6; color: black; }
+</style>
+<table class="sniper-table">
+<thead>
+<tr>
+<th>📌</th><th>代碼</th><th>名稱 (Link)</th><th>訊號</th><th>5MA</th><th>現價</th><th>漲跌%</th>
+<th>均價 (燈)</th><th>量比 (昨/5日)</th><th>局勢</th><th>大戶1H</th><th>買賣壓(%)</th>
+</tr>
+</thead>
+<tbody>
+"""
+    html_rows = []
+    for _, row in df_watch.iterrows():
+        row_class = "pinned-row" if row['Pinned'] else ""
+        pin_icon = "📌" if row['Pinned'] else ""
 
-    for i, (index, row) in enumerate(df_watch.iterrows()):
-        if i >= len(cols): break
+        # 1. Price
+        main_color = "#ff4d4f" if row['pct'] > 0 else "#2ecc71" if row['pct'] < 0 else "#999999"
         
-        with cols[i]:
-            is_bullish = row['price'] >= row['vwap']
-            is_attack = "攻擊" in str(row['event_label']) or "伏擊" in str(row['event_label'])
-            
-            status_emoji = "🔴" if is_bullish else "🟢"
-            if is_attack: status_emoji = "🔥"
+        price_html = f"<span style='color:{main_color}; font-weight:bold'>{row['price']:.2f}</span>"
+        pct_html = f"<span style='color:{main_color}'>{row['pct']:.2f}%</span>"
 
-            # 1. Title with Link
-            name_link = f"[{row['name']}](https://tw.stock.yahoo.com/quote/{row['code']}.TW)"
-            st.markdown(f"#### {status_emoji} {row['code']} {name_link}")
+        # 2. VWAP Light
+        is_bullish = row['price'] >= row['vwap']
+        vwap_color = "#ff4d4f" if is_bullish else "#2ecc71"
+        vwap_light = "🔴" if is_bullish else "🟢"
+        vwap_html = f"<span style='color:{vwap_color}'>{row['vwap']:.2f} {vwap_light}</span>"
 
-            # 2. Price Metric
-            price_delta = f"{row['pct']:.2f}%"
-            st.metric(
-                label=f"現價 (均 {row['vwap']:.1f})",
-                value=f"{row['price']:.2f}",
-                delta=price_delta
-            )
+        # 3. 5MA
+        p_5ma = row.get('price_5ma', 0)
+        c_5ma = "#ff4d4f" if row['price'] > p_5ma else "#2ecc71"
+        ma_html = f"<span style='color:{c_5ma}'>{p_5ma:.2f}</span>"
 
-            # 3. Situation
-            situation = row.get('situation', '盤整')
-            sit_color = "red" if "吸籌" in situation else "green" if "倒貨" in situation else "gray"
-            st.markdown(f"**局勢：** :{sit_color}[{situation}]")
+        # 4. Volume Dual Track
+        r_yest = row.get('ratio_yest', 0)
+        r_5ma = row['ratio']
+        c_5ma_r = "#ff4d4f" if r_5ma >= 1.5 else "#999999"
+        ratio_html = f"{r_yest:.1f} / <span style='color:{c_5ma_r}; font-weight:bold'>{r_5ma:.1f}</span>"
 
-            # 4. Volume Engine (Dual Track)
-            ratio_5ma = row['ratio']
-            ratio_yest = row.get('ratio_yest', 0)
-            progress_val = min(ratio_5ma / 2.5, 1.0)
-            val_color = "red" if ratio_5ma >= 1.5 else "gray"
-            st.markdown(f"**量能：** :{val_color}[{ratio_5ma:.1f} 倍] (昨 {ratio_yest:.1f})")
-            st.progress(progress_val)
+        # 5. Situation
+        situation = row.get('situation', '盤整')
+        sit_color = "#ff4d4f" if "吸籌" in situation or "攻擊" in situation else "#2ecc71" if "倒貨" in situation else "#e67e22" if "吃盤" in situation else "#999999"
+        clean_situation = situation.replace("🔥", "").replace("🛡️", "").replace("💀", "").replace("🎣", "").replace("⚖️", "")
+        situation_html = f"<span style='color:{sit_color}; font-weight:bold'>{clean_situation}</span>"
+        
+        # 6. Link
+        name_html = f'<a href="https://tw.stock.yahoo.com/quote/{row["code"]}.TW" target="_blank" style="text-decoration:none; color:#3498db; font-weight:bold;">{row["name"]}</a>'
 
-            # 5. Buy/Sell Pressure (New!)
-            buy_p = row.get('buy_pressure', 50)
-            sell_p = row.get('sell_pressure', 50)
-            st.caption(f"買壓 {buy_p:.0f}%  vs  賣壓 {sell_p:.0f}%")
-            # 視覺化壓力條: 買壓(紅) ---- 賣壓(綠)
-            # Streamlit 原生 progress 只能單色，這裡用 Markdown 模擬
-            if buy_p > 60: pressure_bar = "🔴🔴🔴🔴🔴⚪⚪⚪⚪⚪"
-            elif buy_p < 40: pressure_bar = "🟢🟢🟢🟢🟢⚪⚪⚪⚪⚪"
-            else: pressure_bar = "⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪"
-            st.markdown(f"{pressure_bar}")
+        # 7. Big Player Light
+        net_1h = row['net_1h']
+        bp_light = "🔴" if net_1h > 0 else "🟢" if net_1h < 0 else "⚪"
+        bp_color = "#ff4d4f" if net_1h > 0 else "#2ecc71" if net_1h < 0 else "#999999"
+        bp_html = f"{bp_light} <span style='color:{bp_color}'>{int(net_1h)}</span>"
 
-            # 6. Big Player Firepower
-            net_1h = row['net_1h']
-            st.markdown(f"**大戶 1H：** {int(net_1h)} 張")
-            if net_1h > 0:
-                st.markdown(":red[===============> 主力買進]")
-            elif net_1h < 0:
-                st.markdown(":green[<=============== 主力賣出]")
-            else:
-                st.markdown(":gray[--- 觀望 ---]")
+        # 8. Pressure
+        buy_p = row.get('buy_pressure', 0)
+        sell_p = row.get('sell_pressure', 0)
+        pressure_html = f"<span style='color:#ff4d4f'>{buy_p:.0f}</span> : <span style='color:#2ecc71'>{sell_p:.0f}</span>"
 
-            # 7. 5MA Defense
-            p_5ma = row.get('price_5ma', 0)
-            dist_5ma = ((row['price'] - p_5ma) / p_5ma) * 100 if p_5ma > 0 else 0
-            st.caption(f"5MA: {p_5ma:.2f} (乖離 {dist_5ma:.1f}%)")
-            
-            st.divider()
+        html_rows.append(f'<tr class="{row_class}"><td>{pin_icon}</td><td>{row["code"]}</td><td>{name_html}</td><td>{row["event_label"]}</td><td>{ma_html}</td><td>{price_html}</td><td>{pct_html}</td><td>{vwap_html}</td><td>{ratio_html}</td><td>{situation_html}</td><td>{bp_html}</td><td>{pressure_html}</td></tr>')
+
+    st.markdown(table_start + "".join(html_rows) + "</tbody></table>", unsafe_allow_html=True)
 
 render_live_dashboard()
