@@ -16,7 +16,7 @@ pd.set_option('future.no_silent_downcasting', True)
 # ==========================================
 # 1. Config & Domain Models
 # ==========================================
-st.set_page_config(page_title="Sniper v5.6.1", page_icon="🛡️", layout="wide")
+st.set_page_config(page_title="Sniper v6.0 Final", page_icon="🛡️", layout="wide")
 
 try:
     raw_fugle_keys = st.secrets.get("Fugle_API_Key", "")
@@ -31,7 +31,7 @@ API_KEYS = [k.strip() for k in raw_fugle_keys.split(',') if k.strip()]
 DB_PATH = "sniper_v61.db"
 
 # [01/28 Elite List] 70-400元 精選清單
-DEFAULT_WATCHLIST = "3037 6274 1795 1513 3019 3491 2408 8261 3035 3443 2368 2383 6213 6235 3533"
+DEFAULT_WATCHLIST = "3037 6274 1795 1513 3019 3491 2408 8261 3035 3443"
 
 # [User Inventory] 指揮官最新庫存狀態
 DEFAULT_INVENTORY = """2481,84.4,3
@@ -40,8 +40,7 @@ DEFAULT_INVENTORY = """2481,84.4,3
 8046,252.64,7"""
 
 AI_COMMANDER_PROMPT = """
-# 🛡️ Sniper 股市戰情室 AI 指揮官
-(Prompt 內容省略，功能維持不變)
+# 🛡️ Sniper 股市戰情室 AI 指揮官 (省略，為節省長度，請沿用原本的 Prompt)
 """
 
 @dataclass
@@ -73,7 +72,7 @@ class MarketSession:
         return MarketSession.MARKET_OPEN <= now.time() <= MarketSession.MARKET_CLOSE
 
 # ==========================================
-# 3. Database (Fix Applied)
+# 3. Database
 # ==========================================
 class Database:
     def __init__(self, db_path):
@@ -87,7 +86,8 @@ class Database:
 
     def _init_db(self):
         conn = self._get_conn(); c = conn.cursor()
-        c.execute('''CREATE TABLE IF NOT EXISTS realtime (code TEXT PRIMARY KEY, name TEXT, category TEXT, price REAL, pct REAL, vwap REAL, vol REAL, est_vol REAL, ratio REAL, net_1h REAL, net_10m REAL, net_day REAL, signal TEXT, update_time REAL, data_status TEXT DEFAULT 'DATA_OK', signal_level TEXT DEFAULT 'B', risk_status TEXT DEFAULT 'NORMAL', situation TEXT, ratio_yest REAL)''')
+        # [Schema Update] 新增 buy_pressure, sell_pressure
+        c.execute('''CREATE TABLE IF NOT EXISTS realtime (code TEXT PRIMARY KEY, name TEXT, category TEXT, price REAL, pct REAL, vwap REAL, vol REAL, est_vol REAL, ratio REAL, net_1h REAL, net_10m REAL, net_day REAL, signal TEXT, update_time REAL, data_status TEXT DEFAULT 'DATA_OK', signal_level TEXT DEFAULT 'B', risk_status TEXT DEFAULT 'NORMAL', situation TEXT, ratio_yest REAL, buy_pressure REAL, sell_pressure REAL)''')
         c.execute('''CREATE TABLE IF NOT EXISTS inventory (code TEXT PRIMARY KEY, cost REAL, qty REAL)''')
         c.execute('''CREATE TABLE IF NOT EXISTS watchlist (code TEXT PRIMARY KEY)''')
         c.execute('''CREATE TABLE IF NOT EXISTS pinned (code TEXT PRIMARY KEY)''')
@@ -113,7 +113,7 @@ class Database:
 
     def upsert_realtime_batch(self, data_list):
         if not data_list: return
-        sql = '''INSERT OR REPLACE INTO realtime (code, name, category, price, pct, vwap, vol, est_vol, ratio, net_1h, net_day, signal, update_time, data_status, signal_level, risk_status, net_10m, situation, ratio_yest) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
+        sql = '''INSERT OR REPLACE INTO realtime (code, name, category, price, pct, vwap, vol, est_vol, ratio, net_1h, net_day, signal, update_time, data_status, signal_level, risk_status, net_10m, situation, ratio_yest, buy_pressure, sell_pressure) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'''
         self.write_queue.put(('executemany', sql, data_list))
 
     def upsert_static(self, data_list):
@@ -140,13 +140,12 @@ class Database:
 
     def get_watchlist_view(self):
         conn = self._get_conn()
-        query = '''SELECT w.code, r.name, r.pct, r.price, r.vwap, r.ratio, r.ratio_yest, r.signal as event_label, r.net_10m, r.net_1h, r.net_day, r.situation, s.price_5ma, CASE WHEN p.code IS NOT NULL THEN 1 ELSE 0 END as is_pinned, r.data_status, r.risk_status, r.signal_level FROM watchlist w LEFT JOIN realtime r ON w.code = r.code LEFT JOIN static_info s ON w.code = s.code LEFT JOIN pinned p ON w.code = p.code'''
+        query = '''SELECT w.code, r.name, r.pct, r.price, r.vwap, r.ratio, r.ratio_yest, r.signal as event_label, r.net_10m, r.net_1h, r.net_day, r.situation, r.buy_pressure, r.sell_pressure, s.price_5ma, CASE WHEN p.code IS NOT NULL THEN 1 ELSE 0 END as is_pinned, r.data_status, r.risk_status, r.signal_level FROM watchlist w LEFT JOIN realtime r ON w.code = r.code LEFT JOIN static_info s ON w.code = s.code LEFT JOIN pinned p ON w.code = p.code'''
         df = pd.read_sql(query, conn)
         conn.close(); return df
 
     def get_inventory_view(self):
         conn = self._get_conn()
-        # [CRITICAL FIX] Added 'r.signal_level' to the SELECT clause
         query = '''SELECT i.code, r.name, r.pct, r.price, r.vwap, r.ratio, r.ratio_yest, r.signal as event_label, r.net_1h, r.net_day, r.situation, s.price_5ma, i.cost, i.qty, (r.price - i.cost) * i.qty * 1000 as profit_val, (r.price - i.cost) / i.cost * 100 as profit_pct, CASE WHEN p.code IS NOT NULL THEN 1 ELSE 0 END as is_pinned, r.data_status, r.risk_status, r.signal_level FROM inventory i LEFT JOIN realtime r ON i.code = r.code LEFT JOIN static_info s ON i.code = s.code LEFT JOIN pinned p ON i.code = p.code'''
         df = pd.read_sql(query, conn)
         conn.close(); return df
@@ -307,7 +306,7 @@ class NotificationManager:
 notification_manager = NotificationManager()
 
 # ==========================================
-# 6. Engine (Sniper Core)
+# 6. Engine (Sniper Core - Final)
 # ==========================================
 class SniperEngine:
     def __init__(self):
@@ -375,6 +374,25 @@ class SniperEngine:
             price = q.get('lastPrice', 0)
             if not price: return None
 
+            # [Inner/Outer Disc Core]
+            # Get best bid/ask
+            best_asks = q.get('order', {}).get('bestAsks', [])
+            best_bids = q.get('order', {}).get('bestBids', [])
+            best_ask = best_asks[0].get('price', price) if best_asks else price
+            best_bid = best_bids[0].get('price', price) if best_bids else price
+
+            # [Buy/Sell Pressure Calculation]
+            # Sum of volumes in top 5 bids vs asks
+            total_bid_vol = sum([b.get('unit', 0) for b in best_bids])
+            total_ask_vol = sum([a.get('unit', 0) for a in best_asks])
+            total_pressure = total_bid_vol + total_ask_vol
+            
+            buy_pressure = 0
+            sell_pressure = 0
+            if total_pressure > 0:
+                buy_pressure = (total_bid_vol / total_pressure) * 100
+                sell_pressure = (total_ask_vol / total_pressure) * 100
+
             pct = q.get('changePercent', 0)
             vol_lots = q.get('total', {}).get('tradeVolume', 0)
 
@@ -390,15 +408,19 @@ class SniperEngine:
             total_val = q.get('total', {}).get('tradeValue', 0)
             vwap = (total_val / vol) if vol > 0 else price
 
+            # [Big Player Logic with Inner/Outer Disc]
             delta_net = 0
             if code in self.prev_data:
                 prev_v = self.prev_data[code]['vol']
-                prev_p = self.prev_data[code]['price']
                 delta_v = vol_lots - prev_v
-                threshold = max(1, int(400/price)) if price > 0 else 5
-                if delta_v >= threshold:
-                    if price >= prev_p: delta_net = int(delta_v)
-                    elif price < prev_p: delta_net = -int(delta_v)
+                
+                if delta_v > 0:
+                    if price >= best_ask: delta_net = int(delta_v)
+                    elif price <= best_bid: delta_net = -int(delta_v)
+                    else:
+                        prev_p = self.prev_data[code]['price']
+                        if price > prev_p: delta_net = int(delta_v)
+                        elif price < prev_p: delta_net = -int(delta_v)
 
             self.prev_data[code] = {'vol': vol_lots, 'price': price}
             now_ts = time.time()
@@ -448,7 +470,7 @@ class SniperEngine:
                 )
                 self._dispatch_event(ev)
 
-            return (code, get_stock_name(code), "一般", price, pct, vwap, vol_lots, est_lots, ratio_5ma, net_1h, net_day, raw_state, now_ts, "DATA_OK", "B", "NORMAL", net_10m, situation, ratio_yest)
+            return (code, get_stock_name(code), "一般", price, pct, vwap, vol_lots, est_lots, ratio_5ma, net_1h, net_day, raw_state, now_ts, "DATA_OK", "B", "NORMAL", net_10m, situation, ratio_yest, buy_pressure, sell_pressure)
         except: return None
 
     def _run_loop(self):
@@ -496,10 +518,10 @@ if "sniper_engine_core" not in st.session_state:
 engine = st.session_state.sniper_engine_core
 
 # ==========================================
-# 7. UI (Layout & Fragments)
+# 7. UI (Card Layout)
 # ==========================================
 with st.sidebar:
-    st.title("🛡️ 戰情室 v5.6 Link")
+    st.title("🛡️ 戰情室 v6.0 Final")
     st.subheader("🌡️ 大盤溫度計")
     
     tse_val = engine.market_stats.get("TSE", 0) / 100000000
@@ -570,99 +592,97 @@ except ImportError:
 
 @fragment(run_every=1.5)
 def render_live_dashboard():
-    # --- Part 1: Inventory ---
-    st.subheader("📦 庫存損益")
-    df_inv = db.get_inventory_view()
-    if not df_inv.empty:
-        # 簡單呈現庫存表
-        st.dataframe(df_inv[['code', 'name', 'situation', 'price', 'pct', 'cost', 'profit_val', 'signal_level']], hide_index=True)
-    else: st.info("尚無庫存資料")
+    # --- Part 1: Inventory (Table) ---
+    with st.expander("📦 庫存戰況 (Inventory)", expanded=False):
+        df_inv = db.get_inventory_view()
+        if not df_inv.empty:
+             st.dataframe(df_inv[['code', 'name', 'situation', 'price', 'pct', 'profit_val', 'signal_level']], hide_index=True)
+        else: st.info("尚無庫存")
 
     st.markdown("---")
+    st.subheader("⚔️ 精銳監控 (Tactical Cockpit)")
 
-    # --- Part 2: Watchlist ---
-    st.subheader("🔭 監控雷達")
     df_watch = db.get_watchlist_view()
+    
+    if df_watch.empty:
+        st.info("尚未加入監控標的")
+        return
 
-    if not df_watch.empty:
-        numeric_cols = ['price', 'pct', 'vwap', 'ratio', 'ratio_yest', 'net_10m', 'net_1h', 'net_day', 'price_5ma']
-        for col in numeric_cols:
-            if col in df_watch.columns:
-                df_watch[col] = pd.to_numeric(df_watch[col], errors='coerce').fillna(0.0)
+    # Data Sanitization
+    numeric_cols = ['price', 'pct', 'vwap', 'ratio', 'ratio_yest', 'net_10m', 'net_1h', 'net_day', 'price_5ma', 'buy_pressure', 'sell_pressure']
+    for col in numeric_cols:
+        if col in df_watch.columns:
+            df_watch[col] = pd.to_numeric(df_watch[col], errors='coerce').fillna(0.0)
 
-        all_options = df_watch['code'].tolist()
-        current_pinned = df_watch[df_watch['is_pinned'] == 1]['code'].tolist()
-        new_pinned = st.multiselect("📌 快速釘選", options=all_options, default=current_pinned, format_func=lambda x: f"{x} {get_stock_name(x)}", key="pinned_multiselect")
+    if use_filter:
+        df_watch = df_watch[df_watch['price'] > 70]
 
-        if set(new_pinned) != set(current_pinned):
-            for code in all_options:
-                is_p = 1 if code in new_pinned else 0
-                if is_p != (1 if code in current_pinned else 0): db.update_pinned(code, is_p)
-            st.rerun()
+    # --- Card Rendering ---
+    cols_per_row = 3
+    rows = [st.columns(cols_per_row) for _ in range((len(df_watch) + cols_per_row - 1) // cols_per_row)]
+    cols = [col for row in rows for col in row]
 
-        df_watch['Pinned'] = df_watch['code'].isin(new_pinned)
-
-        if use_filter:
-            df_watch = df_watch[df_watch['price'] > 70]
-
-        # --- HTML Table Construction ---
-        table_start = """
-<style>
-table.sniper-table { width: 100%; border-collapse: collapse; font-family: 'Courier New', monospace; }
-table.sniper-table th { text-align: left; background-color: #262730; color: white; padding: 8px; font-size: 14px; }
-table.sniper-table td { padding: 6px; border-bottom: 1px solid #444; font-size: 15px; vertical-align: middle; }
-table.sniper-table tr.pinned-row { background-color: #fff9c4 !important; color: black !important; }
-table.sniper-table tr:hover { background-color: #f0f2f6; color: black; }
-</style>
-<table class="sniper-table">
-<thead>
-<tr>
-<th>📌</th><th>代碼</th><th>名稱 (Link)</th><th>訊號</th><th>5MA</th><th>現價</th><th>漲跌%</th>
-<th>均價 (燈)</th><th>量比 (昨/5日)</th><th>局勢判斷</th><th>大戶 (10m/1H/日)</th>
-</tr>
-</thead>
-<tbody>
-"""
-        html_rows = []
-        for _, row in df_watch.iterrows():
-            row_class = "pinned-row" if row['Pinned'] else ""
-            pin_icon = "📌" if row['Pinned'] else ""
-
-            main_color = "#ff4d4f" if row['pct'] > 0 else "#2ecc71" if row['pct'] < 0 else "#999999"
+    for i, (index, row) in enumerate(df_watch.iterrows()):
+        if i >= len(cols): break
+        
+        with cols[i]:
+            is_bullish = row['price'] >= row['vwap']
+            is_attack = "攻擊" in str(row['event_label']) or "伏擊" in str(row['event_label'])
             
-            price_html = f"<span style='color:{main_color}; font-weight:bold'>{row['price']:.2f}</span>"
-            pct_html = f"<span style='color:{main_color}'>{row['pct']:.2f}%</span>"
+            status_emoji = "🔴" if is_bullish else "🟢"
+            if is_attack: status_emoji = "🔥"
 
-            vwap_color = "#ff4d4f" if row['price'] >= row['vwap'] else "#2ecc71"
-            vwap_light = "🔴" if row['price'] >= row['vwap'] else "🟢"
-            vwap_html = f"<span style='color:{vwap_color}'>{row['vwap']:.2f} {vwap_light}</span>"
+            # 1. Title with Link
+            name_link = f"[{row['name']}](https://tw.stock.yahoo.com/quote/{row['code']}.TW)"
+            st.markdown(f"#### {status_emoji} {row['code']} {name_link}")
 
-            p_5ma = row.get('price_5ma', 0)
-            c_5ma = "#ff4d4f" if row['price'] > p_5ma else "#2ecc71"
-            ma_html = f"<span style='color:{c_5ma}'>{p_5ma:.2f}</span>"
+            # 2. Price Metric
+            price_delta = f"{row['pct']:.2f}%"
+            st.metric(
+                label=f"現價 (均 {row['vwap']:.1f})",
+                value=f"{row['price']:.2f}",
+                delta=price_delta
+            )
 
-            r_yest = row.get('ratio_yest', 0)
-            r_5ma = row['ratio']
-            c_yest = "#ff4d4f" if r_yest >= 1 else "#999999"
-            c_5ma_r = "#ff4d4f" if r_5ma >= 1 else "#999999"
-            ratio_html = f"<span style='color:{c_yest}'>{r_yest:.1f}</span> / <span style='color:{c_5ma_r}'>{r_5ma:.1f}</span>"
-
+            # 3. Situation
             situation = row.get('situation', '盤整')
-            sit_color = "#ff4d4f" if "吸籌" in situation or "攻擊" in situation else "#2ecc71" if "倒貨" in situation else "#e67e22" if "吃盤" in situation else "#999999"
-            situation_html = f"<span style='color:{sit_color}; font-weight:bold'>{situation}</span>"
+            sit_color = "red" if "吸籌" in situation else "green" if "倒貨" in situation else "gray"
+            st.markdown(f"**局勢：** :{sit_color}[{situation}]")
+
+            # 4. Volume Engine (Dual Track)
+            ratio_5ma = row['ratio']
+            ratio_yest = row.get('ratio_yest', 0)
+            progress_val = min(ratio_5ma / 2.5, 1.0)
+            val_color = "red" if ratio_5ma >= 1.5 else "gray"
+            st.markdown(f"**量能：** :{val_color}[{ratio_5ma:.1f} 倍] (昨 {ratio_yest:.1f})")
+            st.progress(progress_val)
+
+            # 5. Buy/Sell Pressure (New!)
+            buy_p = row.get('buy_pressure', 50)
+            sell_p = row.get('sell_pressure', 50)
+            st.caption(f"買壓 {buy_p:.0f}%  vs  賣壓 {sell_p:.0f}%")
+            # 視覺化壓力條: 買壓(紅) ---- 賣壓(綠)
+            # Streamlit 原生 progress 只能單色，這裡用 Markdown 模擬
+            if buy_p > 60: pressure_bar = "🔴🔴🔴🔴🔴⚪⚪⚪⚪⚪"
+            elif buy_p < 40: pressure_bar = "🟢🟢🟢🟢🟢⚪⚪⚪⚪⚪"
+            else: pressure_bar = "⚪⚪⚪⚪⚪⚪⚪⚪⚪⚪"
+            st.markdown(f"{pressure_bar}")
+
+            # 6. Big Player Firepower
+            net_1h = row['net_1h']
+            st.markdown(f"**大戶 1H：** {int(net_1h)} 張")
+            if net_1h > 0:
+                st.markdown(":red[===============> 主力買進]")
+            elif net_1h < 0:
+                st.markdown(":green[<=============== 主力賣出]")
+            else:
+                st.markdown(":gray[--- 觀望 ---]")
+
+            # 7. 5MA Defense
+            p_5ma = row.get('price_5ma', 0)
+            dist_5ma = ((row['price'] - p_5ma) / p_5ma) * 100 if p_5ma > 0 else 0
+            st.caption(f"5MA: {p_5ma:.2f} (乖離 {dist_5ma:.1f}%)")
             
-            name_html = f'<a href="https://tw.stock.yahoo.com/quote/{row["code"]}.TW" target="_blank" style="text-decoration:none; color:#3498db; font-weight:bold;">{row["name"]}</a>'
-
-            bp_light = "🔴" if row['net_1h'] > 0 else "🟢" if row['net_1h'] < 0 else "⚪"
-            
-            def bp_fmt(val):
-                c = "#ff4d4f" if val > 0 else "#2ecc71" if val < 0 else "#999999"
-                return f"<span style='color:{c}'>{int(val)}</span>"
-
-            bp_html = f"{bp_light} {bp_fmt(row['net_10m'])} / {bp_fmt(row['net_1h'])} / {bp_fmt(row['net_day'])}"
-
-            html_rows.append(f'<tr class="{row_class}"><td>{pin_icon}</td><td>{row["code"]}</td><td>{name_html}</td><td>{row["event_label"]}</td><td>{ma_html}</td><td>{price_html}</td><td>{pct_html}</td><td>{vwap_html}</td><td>{ratio_html}</td><td>{situation_html}</td><td>{bp_html}</td></tr>')
-
-        st.markdown(table_start + "".join(html_rows) + "</tbody></table>", unsafe_allow_html=True)
+            st.divider()
 
 render_live_dashboard()
